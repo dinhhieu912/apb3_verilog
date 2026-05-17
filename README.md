@@ -203,3 +203,9 @@ run -all
 - [ARM AMBA 3 APB Protocol Specification — IHI0024C](https://developer.arm.com/documentation/ihi0024/latest/)
 - Samir Palnitkar, *Verilog HDL: A Guide to Digital Design and Synthesis*, 2nd Edition, Pearson, 2008
 - [EDA Playground — Free online Verilog simulator](https://www.edaplayground.com)
+
+
+## 📬 Contact
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/hi%E1%BA%BFu-tr%E1%BA%A7n-59a741305/)
+[![Gmail](https://img.shields.io/badge/Gmail-D14836?style=flat-square&logo=gmail&logoColor=white)](mailto:dinhhieu9125@gmail.com)
