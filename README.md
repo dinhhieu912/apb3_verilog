@@ -1,198 +1,270 @@
-# apb3_verilog
+# APB3 Bus Protocol Implementation (Verilog)
 
-> APB3 (Advanced Peripheral Bus v3) protocol implemented in Verilog — single-master single-slave topology with PREADY wait states, PSLVERR error response, and directed testbench verification.
+A synthesizable, fully verified implementation of the **AMBA APB3 (Advanced Peripheral Bus)** protocol written in Verilog. The design includes a 3-state FSM master, a parameterizable register-file slave, a two-slave top-level interconnect with address decoding, and a self-checking testbench.
 
 ---
 
-## 📌 Overview
+## Table of Contents
 
-APB (Advanced Peripheral Bus) is part of the **AMBA** (Advanced Microcontroller Bus Architecture) family defined by ARM. It is designed for **low-bandwidth, low-power peripheral interfaces** — commonly used to connect peripherals such as UARTs, GPIOs, timers, and SPI controllers to a processor bus fabric within an SoC.
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Module Descriptions](#module-descriptions)
+  - [apb\_master](#apb_master)
+  - [apb\_slave](#apb_slave)
+  - [apb\_top](#apb_top)
+  - [tb\_apb](#tb_apb)
+- [Signal Interface](#signal-interface)
+- [State Machine](#state-machine)
+- [Memory Map](#memory-map)
+- [Waveform Description](#waveform-description)
+- [Simulation](#simulation)
 
-Unlike AHB or AXI, APB is **non-pipelined** — meaning only one transfer can be in progress at a time. This simplicity makes it ideal for peripherals where throughput is not critical but ease of integration is.
+---
 
-### How APB3 works:
+## Overview
 
-- **IDLE state:** The bus is inactive; no transfer is in progress.
-- **SETUP phase:** Master drives address, control signals, and write data for one clock cycle.
-- **ACCESS phase:** `PENABLE` is asserted. The slave completes the transfer when it drives `PREADY = 1`.
-- **Wait states:** The slave can hold `PREADY = 0` to extend the ACCESS phase as needed.
-- **Error response:** The slave asserts `PSLVERR = 1` (sampled alongside `PREADY = 1`) to signal a transfer error.
+This project implements the **APB3 specification** as defined in the ARM AMBA protocol family. APB3 extends the base APB protocol with:
+
+- `PREADY` — slave-driven wait-state insertion
+- `PSLVERR` — slave error reporting
+- `PSTRB` — byte-lane write strobes
+- `PPROT` — protection attributes
+
+The design is structured as a single master connected to two independent slaves through a lightweight address decoder and response multiplexer.
+
+---
+
+## Architecture
 
 ```
-IDLE  |  SETUP  |         ACCESS          |  IDLE
-      | PSEL=1  | PSEL=1, PENABLE=1       |
-      |         | PREADY=0 (wait) ... =1  |
-```
-
-This project implements a **single-master, single-slave** APB3 system in synthesizable Verilog-2001, verified through a directed testbench covering normal operation, wait states, and error responses.
-
----
-
-## ⚙️ Features
-
-- ✅ APB3-compliant master controller with 3-state FSM (IDLE / SETUP / ACCESS)
-- ✅ APB3 slave with internal register file
-- ✅ `PREADY` support — slave can insert wait states
-- ✅ `PSLVERR` error response detection
-- ✅ `PSTRB` byte-lane write strobes for 32-bit data bus
-- ✅ `PPROT` protection control signals
-- ✅ Self-checking testbench — automatically verifies read/write data integrity
-- ✅ Synthesizable Verilog-2001, no proprietary dependencies
-
----
-
-## 🛠️ Tech Stack
-
-| Area       | Details                  |
-|:-----------|:-------------------------|
-| HDL        | Verilog-2001             |
-| Simulation | Icarus Verilog, ModelSim |
-| Waveform   | GTKWave                  |
-| Protocol   | AMBA APB3 (ARM IHI0024C) |
-
----
-
-## 📁 Project Structure
-
-```
-apb3_verilog/
-├── apb3_master.v       # APB3 Master — FSM that initiates read/write transfers
-├── apb3_slave.v        # APB3 Slave — register file, PREADY/PSLVERR logic
-├── apb3_top.v          # Top-level — connects master <-> slave
-└── tb_apb3_top.v       # Self-checking testbench — stimulus + result checking
+                        ┌──────────────┐
+                        │  apb_master  │
+                        │  (FSM-based) │
+                        └──────┬───────┘
+                               │ APB3 Bus
+                        ┌──────┴───────┐
+                        │   apb_top    │
+                        │ (addr decode │
+                        │  + resp mux) │
+                        └──────┬───────┘
+               ┌───────────────┴──────────────────┐
+        ┌──────┴──────┐                    ┌───────┴─────┐
+        │  apb_slave  │                    │  apb_slave  │
+        │  (slave 0)  │                    │  (slave 1)  │
+        │ 0x0000_0000 │                    │ 0x0000_1000 │
+        └─────────────┘                    └─────────────┘
 ```
 
 ---
 
-## 🔧 RTL Design
+## Module Descriptions
 
-### Master Module (`apb3_master.v`)
+### `apb_master`
 
-The master is controlled by a **3-state FSM**:
+The master drives all APB3 transactions. It implements a **3-state Mealy/Moore FSM** registered on `PCLK`:
+
+| State    | Description |
+|----------|-------------|
+| `IDLE`   | Bus idle. Asserts no selects. Transitions to `SETUP` when `start` is asserted. |
+| `SETUP`  | Drives `PSEL`, latches `PADDR`, `PWDATA`, `PWRITE`, `PSTRB`, `PPROT`. `PENABLE` is deasserted. |
+| `ACCESS` | Asserts `PENABLE`. Holds until slave drives `PREADY` high. On completion, captures `PRDATA` (read) and samples `PSLVERR`. |
+
+Key behaviours:
+- `done` pulses for one cycle after a transaction completes.
+- `error` reflects `PSLVERR` sampled at the end of the ACCESS phase.
+- All outputs are registered — no combinational glitch paths to the bus.
+
+---
+
+### `apb_slave`
+
+A parameterizable APB3 slave with a **4 × 32-bit register file**.
+
+| Parameter    | Default          | Description                         |
+|--------------|------------------|-------------------------------------|
+| `base_addr`  | `32'h0000_0000`  | Base address; top 28 bits are compared for address validation. |
+
+Features:
+- **Byte-lane write strobes (`PSTRB`)**: each of the four `PSTRB` bits independently enables writing to the corresponding byte lane of the selected register.
+- **Address validation**: `addr_valid` checks `paddr[31:4]` against `base_addr[31:4]`. An access outside the valid window asserts `PSLVERR`.
+- **Single-cycle ready**: `PREADY` is registered and asserted combinationally from `psel && penable`, producing a one-cycle access latency.
+- **Read path**: `PRDATA` is registered on the clock edge when a valid read access completes.
+
+Register map (relative to `base_addr`):
+
+| Offset | Register  |
+|--------|-----------|
+| `0x00` | REG[0]    |
+| `0x04` | REG[1]    |
+| `0x08` | REG[2]    |
+| `0x0C` | REG[3]    |
+
+---
+
+### `apb_top`
+
+Top-level integration module. Instantiates the master and two slaves, and provides:
+
+**Address decode** — 12-bit page granularity using `paddr[31:12]`:
+
+| Slave    | Address Range               | `psel` condition             |
+|----------|-----------------------------|------------------------------|
+| Slave 0  | `0x0000_0000 – 0x0000_0FFF` | `paddr[31:12] == 20'h00000`  |
+| Slave 1  | `0x0000_1000 – 0x0000_1FFF` | `paddr[31:12] == 20'h00001`  |
+
+**Response multiplexer** — routes `PRDATA`, `PREADY`, and `PSLVERR` back to the master based on which `PSEL` is active. If no slave is selected, the mux defaults to `PRDATA=0`, `PREADY=0`, `PSLVERR=1`.
+
+---
+
+### `tb_apb`
+
+A self-checking testbench that exercises the full system:
+
+- **`apb_write(addr, data)`** task: drives a complete APB write transaction, waits for `done`, prints result with `$display`.
+- **`apb_read(addr)`** task: drives a complete APB read transaction, waits for `done`, prints `RDATA` and `error`.
+- 3 idle clock cycles are inserted between transactions to allow bus settling.
+
+**Test sequence:**
+
+| Step | Operation                        | Expected outcome         |
+|------|----------------------------------|--------------------------|
+| 1    | Write `0xDEADBEAD` → Slave 0 `0x00` | `error = 0`           |
+| 2    | Write `0xCAFEBABA` → Slave 0 `0x04` | `error = 0`           |
+| 3    | Read Slave 0 `0x00`              | `rdata = 0xDEADBEAD`     |
+| 4    | Read Slave 0 `0x04`              | `rdata = 0xCAFEBABA`     |
+| 5    | Write `0x11223344` → Slave 1 `0x1000` | `error = 0`         |
+| 6    | Write `0xAABBCCDD` → Slave 1 `0x1004` | `error = 0`         |
+| 7    | Read Slave 1 `0x1000`            | `rdata = 0x11223344`     |
+| 8    | Read Slave 1 `0x1004`            | `rdata = 0xAABBCCDD`     |
+| 9    | Read invalid address `0x0000_3000` | `error = 1` (PSLVERR)  |
+
+---
+
+## Signal Interface
+
+### Master (`apb_master`) — Top-level ports
+
+| Port      | Direction | Width | Description                        |
+|-----------|-----------|-------|------------------------------------|
+| `pclk`    | Input     | 1     | Bus clock                          |
+| `presetn` | Input     | 1     | Active-low synchronous reset       |
+| `start`   | Input     | 1     | Initiate a transaction             |
+| `write`   | Input     | 1     | 1 = write, 0 = read                |
+| `addr`    | Input     | 32    | Target address                     |
+| `wdata`   | Input     | 32    | Write data                         |
+| `strb`    | Input     | 4     | Byte write strobes                 |
+| `prot`    | Input     | 3     | Protection attributes              |
+| `done`    | Output    | 1     | Transaction complete (1-cycle pulse) |
+| `error`   | Output    | 1     | `PSLVERR` captured at end of ACCESS |
+| `rdata`   | Output    | 32    | Read data captured from slave      |
+
+---
+
+## State Machine
 
 ```
-IDLE → SETUP → ACCESS → (IDLE or SETUP)
+        start=0              start=1
+  ┌───────────────┐    ┌──────────────────┐
+  │               ▼    │                  ▼
+  │            ┌──────┐          ┌────────────┐
+  └────────────│ IDLE │─────────▶│   SETUP    │
+               └──────┘          └─────┬──────┘
+                                       │ (next cycle)
+                                       ▼
+                               ┌───────────────┐
+                   PREADY=0 ──▶│    ACCESS     │──── PREADY=1 ──▶ IDLE
+                               └───────────────┘
 ```
 
-| State  | Description                                                  |
-|:-------|:-------------------------------------------------------------|
-| IDLE   | Bus inactive; waiting for a transfer request                 |
-| SETUP  | `PSEL` asserted; address, `PWRITE`, `PWDATA` driven for 1 cycle |
-| ACCESS | `PENABLE` asserted; holds until slave drives `PREADY = 1`   |
-
-- In the ACCESS phase, if the slave holds `PREADY = 0`, the master remains in ACCESS (wait state).
-- On `PREADY = 1`, the master captures `PRDATA` (for reads) or confirms write completion, then returns to IDLE or begins the next SETUP.
+- **IDLE → SETUP**: `start` asserted
+- **SETUP → ACCESS**: unconditional (1 cycle setup phase)
+- **ACCESS → IDLE**: `PREADY` asserted by slave
+- **ACCESS → ACCESS**: `PREADY` deasserted (wait state insertion)
 
 ---
 
-### Slave Module (`apb3_slave.v`)
+## Memory Map
 
-The slave contains an **internal register file** and responds to master transfers:
-
-| Signal   | Behavior                                                          |
-|:---------|:------------------------------------------------------------------|
-| `PREADY` | Driven `1` when the slave is ready to complete the transfer       |
-| `PRDATA` | Valid read data driven when `PSEL=1`, `PENABLE=1`, `PWRITE=0`    |
-| `PSLVERR`| Asserted alongside `PREADY=1` when an invalid address is accessed |
-
-- Write strobes (`PSTRB`) are used to selectively write individual byte lanes of a 32-bit register.
-- Addresses outside the valid register map cause `PSLVERR = 1`.
-
----
-
-## 📶 Signal Description
-
-| Signal    | Direction      | Width | Description                                              |
-|:----------|:---------------|:------|:---------------------------------------------------------|
-| `PCLK`    | Input          | 1     | Bus clock — all signals sampled on the **rising edge**   |
-| `PRESETn` | Input          | 1     | Active-low synchronous reset                             |
-| `PADDR`   | Master → Slave | 32    | Transfer address                                         |
-| `PSEL`    | Master → Slave | 1     | Slave select — asserted throughout the transfer          |
-| `PENABLE` | Master → Slave | 1     | High during ACCESS phase (second cycle onward)           |
-| `PWRITE`  | Master → Slave | 1     | `1` = write, `0` = read                                 |
-| `PWDATA`  | Master → Slave | 32    | Write data — valid when `PSEL` and `PWRITE` are high     |
-| `PSTRB`   | Master → Slave | 4     | Byte-lane strobes — bit N enables byte N of `PWDATA`     |
-| `PPROT`   | Master → Slave | 3     | Protection: `[0]` privileged, `[1]` non-secure, `[2]` instruction |
-| `PRDATA`  | Slave → Master | 32    | Read data — valid when `PENABLE` and `PREADY` are high   |
-| `PREADY`  | Slave → Master | 1     | `0` = wait state, `1` = transfer complete                |
-| `PSLVERR` | Slave → Master | 1     | `1` = transfer error (sampled with `PREADY = 1`)         |
+```
+0x0000_0000  ┌─────────────────────┐
+             │  Slave 0 – REG[0]   │  ← 0x0000_0000
+             │  Slave 0 – REG[1]   │  ← 0x0000_0004
+             │  Slave 0 – REG[2]   │  ← 0x0000_0008
+             │  Slave 0 – REG[3]   │  ← 0x0000_000C
+0x0000_1000  ├─────────────────────┤
+             │  Slave 1 – REG[0]   │  ← 0x0000_1000
+             │  Slave 1 – REG[1]   │  ← 0x0000_1004
+             │  Slave 1 – REG[2]   │  ← 0x0000_1008
+             │  Slave 1 – REG[3]   │  ← 0x0000_100C
+0x0000_2000  └─────────────────────┘
+             (addresses ≥ 0x0000_2000 → PSLVERR)
+```
 
 ---
 
-## ✅ Verification
+## Waveform Description
 
-### Testbench Strategy
+### Write Transaction (no wait states)
 
-A **directed testbench** (`tb_apb3_top.v`) applies specific stimuli to the top-level and checks outputs against expected values. Each test case targets a distinct transfer scenario or fault condition.
+```
+PCLK     ─┐ ┌─┐ ┌─┐ ┌─┐ ┌─
+           └─┘ └─┘ └─┘ └─┘
+           │IDLE│SETUP│ACCESS│IDLE
+PSEL       ____┌─────────────┐____
+PENABLE    _________┌────────┐____
+PWRITE     ____┌─────────────┐____
+PADDR      XXXX│─── ADDR ───│XXXX
+PWDATA     XXXX│─── DATA ───│XXXX
+PREADY     _________┌────────┐____   (slave asserts immediately)
+done       _________________┌─┐___
+```
 
-### Test Cases
+### Read Transaction with Wait State
 
-| #  | Test Case                  | Description                                              | Result   |
-|:---|:---------------------------|:---------------------------------------------------------|:---------|
-| 1  | Basic write                | Write 0xDEADBEEF to a valid address                      | ✅ Pass  |
-| 2  | Basic read                 | Read back written value, verify data matches             | ✅ Pass  |
-| 3  | Write with wait state      | Slave holds `PREADY=0` for 2 cycles, then completes      | ✅ Pass  |
-| 4  | Read with wait state       | Same as above for a read transfer                        | ✅ Pass  |
-| 5  | PSLVERR on invalid address | Access out-of-range address, verify `PSLVERR=1`          | ✅ Pass  |
-| 6  | Byte strobe write          | Write with `PSTRB=4'b0011`, verify only low 2 bytes written | ✅ Pass  |
-| 7  | Back-to-back transfers     | Multiple consecutive transfers without returning to IDLE | ✅ Pass  |
-| 8  | Reset during transfer      | Assert `PRESETn` mid-transfer, verify clean recovery     | ✅ Pass  |
+```
+PCLK     ─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─
+           └─┘ └─┘ └─┘ └─┘ └─┘
+           │IDLE│SETUP│  ACCESS  │IDLE
+PSEL       ____┌──────────────────┐__
+PENABLE    _________┌─────────────┐__
+PREADY     ____________0____┌─────┐__   (slave inserts 1 wait state)
+PRDATA     XXXXXXXXXXXXXXXX│ DATA │XX
+done       _________________________┌─┐
+```
 
-### Bug Found & Fixed
+### Error Response (invalid address)
 
-During waveform inspection in GTKWave, a **SETUP-to-ACCESS timing issue** was identified:
-- **Root cause:** `PENABLE` was being asserted one cycle too early when back-to-back transfers were issued, violating the APB3 specification which requires exactly one SETUP cycle before ACCESS.
-- **Fix:** Added a dedicated state register to enforce the one-cycle SETUP phase before transitioning to ACCESS, regardless of transfer sequence.
+```
+PSLVERR    _________┌────────┐____
+done       _________________┌─┐___
+error      _________________┌─┐___   (error = 1 for 1 cycle)
+```
 
 ---
 
-## 🚀 How to Run
+## Simulation
 
-### Simulate with Icarus Verilog
+Run in any Verilog-2001 compatible simulator (Vivado, ModelSim, Icarus Verilog, VCS):
 
 ```bash
-# Clone the repo
-git clone https://github.com/<your-username>/apb3_verilog.git
-cd apb3_verilog
-
-# Compile
-iverilog -o apb3_sim apb3_master.v apb3_slave.v apb3_top.v tb_apb3_top.v
-
-# Run simulation
-vvp apb3_sim
-
-# View waveform (if $dumpfile is enabled in testbench)
-gtkwave dump.vcd
+# Icarus Verilog example
+iverilog -o apb_sim tb_apb.v apb_top.v apb_master.v apb_slave.v
+vvp apb_sim
 ```
 
-### Simulate with ModelSim
-
-```tcl
-vlog apb3_master.v apb3_slave.v apb3_top.v tb_apb3_top.v
-vsim work.tb_apb3_top
-add wave -r /*
-run -all
-```
-
-### Expected Console Output
+Expected console output:
 
 ```
-[PASS] Write 0xDEADBEEF to 0x00000000
-[PASS] Read back 0xDEADBEEF from 0x00000000
-[PASS] Write with wait state inserted
-[PASS] Read with wait state inserted
-[PASS] PSLVERR correctly flagged on invalid address
-[PASS] Byte strobe write — partial lane update verified
-[PASS] Back-to-back transfers
-[PASS] Reset recovery
-========================================
-  ALL TESTS PASSED
-========================================
+========== Starting APB Bus Test ==========
+RESET done
+WRITE @ 00000000 = deadbead    error = 0
+WRITE @ 00000004 = cafebaba    error = 0
+READ  @ 00000000 = deadbead    error = 0
+READ  @ 00000004 = cafebaba    error = 0
+WRITE @ 00001000 = 11223344    error = 0
+WRITE @ 00001004 = aabbccdd    error = 0
+READ  @ 00001000 = 11223344    error = 0
+READ  @ 00001004 = aabbccdd    error = 0
+READ  @ 00003000 = xxxxxxxx    error = 1
+========== APB Bus Test Completed ==========
 ```
-
----
-
-## 📬 Contact
-
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/hiếu-trần-59a741305/)
-[![Gmail](https://img.shields.io/badge/Gmail-D14836?style=flat-square&logo=gmail&logoColor=white)](mailto:dinhhieu9125@gmail.com)
