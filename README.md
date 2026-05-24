@@ -1,4 +1,4 @@
-# APB3 Bus Protocol Implementation (Verilog)
+# APB3 Bus Protocol Design & Verification
 
 A synthesizable, fully verified implementation of the **AMBA APB3 (Advanced Peripheral Bus)** protocol written in Verilog. The design includes a 3-state FSM master, a parameterizable register-file slave, a two-slave top-level interconnect with address decoding, and a self-checking testbench.
 
