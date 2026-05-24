@@ -268,3 +268,8 @@ READ  @ 00001004 = aabbccdd    error = 0
 READ  @ 00003000 = xxxxxxxx    error = 1
 ========== APB Bus Test Completed ==========
 ```
+
+## 📬 Contact
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/hiếu-trần-59a741305/)
+[![Gmail](https://img.shields.io/badge/Gmail-D14836?style=flat-square&logo=gmail&logoColor=white)](mailto:dinhhieu9125@gmail.com)
